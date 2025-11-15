@@ -3,6 +3,7 @@ import numpy as np
 from pyray import *
 from pyray import ffi
 from ultralytics import YOLO
+import mediapipe as mp
 import pickle
 from pathlib import Path
 import subprocess
@@ -19,15 +20,28 @@ class ProjectorInterface:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
 
-        # Load YOLO model
+        # Load YOLO model (keep for potential object detection)
         print("Loading YOLO model...")
         self.model = YOLO('yolov8n.pt')
         print("Model loaded!")
 
+        # Initialize MediaPipe Hand tracking
+        print("Initializing MediaPipe Hand tracking...")
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        print("Hand tracking initialized!")
+
         # Detection state
         self.detections = []
+        self.hand_landmarks = []  # Store hand landmarks
         self.frame_count = 0
-        self.detect_every_n_frames = 3
+        self.detect_every_n_frames = 1  # Run hand detection every frame
+        self.confidence_threshold = 0.5
 
         # Projection window settings
         self.projection_width = 1920
@@ -115,32 +129,41 @@ class ProjectorInterface:
         if self.detected_corners is None:
             return None
 
-        # Read projector dot positions
+        # Read projector dot positions (stored as relative 0-1 coordinates)
         try:
             with open(self.dots_file, 'rb') as f:
-                dot_positions = pickle.load(f)
+                dot_positions_relative = pickle.load(f)
 
-            # Projector coordinates (where dots are displayed)
+            # Convert relative to absolute pixel coordinates
             proj_points = np.array([
-                dot_positions['red'],
-                dot_positions['green'],
-                dot_positions['magenta'],
-                dot_positions['yellow']
+                [dot_positions_relative['red'][0] * self.projection_width,
+                 dot_positions_relative['red'][1] * self.projection_height],
+                [dot_positions_relative['green'][0] * self.projection_width,
+                 dot_positions_relative['green'][1] * self.projection_height],
+                [dot_positions_relative['magenta'][0] * self.projection_width,
+                 dot_positions_relative['magenta'][1] * self.projection_height],
+                [dot_positions_relative['yellow'][0] * self.projection_width,
+                 dot_positions_relative['yellow'][1] * self.projection_height]
             ], dtype="float32")
 
             # Camera coordinates (where we detected the dots)
             cam_points = self.detected_corners
 
+            print("\n=== HOMOGRAPHY CALCULATION ===")
+            print(f"Camera points (pixels):\n{cam_points}")
+            print(f"Projector points (pixels):\n{proj_points}")
+
             # Compute homography: maps camera coords -> projector coords
             self.homography_matrix, _ = cv2.findHomography(cam_points, proj_points)
 
-            print("Homography matrix computed:")
-            print(self.homography_matrix)
+            print(f"Homography matrix:\n{self.homography_matrix}")
 
             return self.homography_matrix
 
         except Exception as e:
             print(f"Error computing homography: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def warp_perspective(self, frame):
@@ -148,14 +171,31 @@ class ProjectorInterface:
         if self.homography_matrix is None:
             return None
 
-        # Warp entire camera frame to projector space
-        warped = cv2.warpPerspective(
-            frame,
-            self.homography_matrix,
-            (self.projection_width, self.projection_height)
-        )
+        try:
+            # Warp entire camera frame to projector space
+            warped = cv2.warpPerspective(
+                frame,
+                self.homography_matrix,
+                (self.projection_width, self.projection_height)
+            )
 
-        return warped
+            # Validate the warped frame
+            if warped is None or warped.size == 0:
+                print("⚠ Warped frame is empty!")
+                return None
+
+            # Check if image has valid data
+            if warped.min() == warped.max():
+                print("⚠ Warped frame has no variance (all same color)")
+                return None
+
+            return warped
+
+        except Exception as e:
+            print(f"Error in warp_perspective: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def process_frame(self):
         """Capture and process a frame from the camera"""
@@ -169,7 +209,8 @@ class ProjectorInterface:
         try:
             state = {
                 'calibrated': self.calibration_mode,
-                'detections': self.detections
+                'detections': self.detections,
+                'hand_landmarks': self.hand_landmarks
             }
             with open(self.state_file, 'wb') as f:
                 pickle.dump(state, f)
@@ -180,28 +221,43 @@ class ProjectorInterface:
         if self.calibration_mode and self.homography_matrix is not None:
             self.warped_frame = self.warp_perspective(frame)
 
-            # Run detection on warped frame
-            if self.warped_frame is not None and self.frame_count % self.detect_every_n_frames == 0:
-                results = self.model(self.warped_frame, verbose=False)
-                self.detections = []
+            # Debug: print once when starting detection
+            if self.frame_count == 1:
+                print(f"\n=== DETECTION ACTIVE ===")
+                print(f"Calibration mode: {self.calibration_mode}")
+                print(f"Homography matrix exists: {self.homography_matrix is not None}")
+                print(f"Warped frame shape: {self.warped_frame.shape if self.warped_frame is not None else 'None'}")
 
-                for result in results:
-                    boxes = result.boxes
-                    for box in boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                        conf = float(box.conf[0])
-                        cls = int(box.cls[0])
-                        class_name = self.model.names[cls]
+                # Save debug image
+                if self.warped_frame is not None:
+                    cv2.imwrite('/tmp/warped_debug.jpg', self.warped_frame)
+                    print(f"Saved debug warped frame to /tmp/warped_debug.jpg")
 
-                        self.detections.append({
-                            'bbox': (int(x1), int(y1), int(x2), int(y2)),
-                            'confidence': conf,
-                            'class': class_name
-                        })
+            # Run hand detection on warped frame
+            if self.warped_frame is not None:
+                # Convert BGR to RGB for MediaPipe
+                warped_rgb = cv2.cvtColor(self.warped_frame, cv2.COLOR_BGR2RGB)
+                results = self.hands.process(warped_rgb)
 
-                # Debug output
-                if len(self.detections) > 0:
-                    print(f"Detected {len(self.detections)} objects: {[d['class'] for d in self.detections]}")
+                self.hand_landmarks = []
+
+                if results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        # Convert normalized coordinates to pixel coordinates
+                        landmarks_px = []
+                        for landmark in hand_landmarks.landmark:
+                            x_px = int(landmark.x * self.projection_width)
+                            y_px = int(landmark.y * self.projection_height)
+                            landmarks_px.append((x_px, y_px))
+
+                        self.hand_landmarks.append(landmarks_px)
+
+                # Debug output every 30 frames
+                if self.frame_count % 30 == 0:
+                    if len(self.hand_landmarks) > 0:
+                        print(f"✓ Detected {len(self.hand_landmarks)} hand(s)")
+                    else:
+                        print(f"○ No hands detected (frame {self.frame_count})")
 
             # Save warped frame
             try:
@@ -209,6 +265,10 @@ class ProjectorInterface:
                     np.save(self.frame_file, self.warped_frame)
             except Exception as e:
                 print(f"Error writing frame: {e}")
+        elif self.calibration_mode:
+            # Calibrated but no homography matrix
+            if self.frame_count % 60 == 0:
+                print(f"⚠ Calibrated but homography_matrix is None!")
 
         self.frame_count += 1
         return frame
@@ -251,7 +311,8 @@ class ProjectorInterface:
         camera_preview_script = Path(__file__).parent / "camera_preview.py"
         subprocess.Popen([sys.executable, str(camera_preview_script)])
 
-        # Run dev window
+        # Run dev window - disable Raylib logging
+        set_trace_log_level(LOG_WARNING)  # Only show warnings and errors
         set_config_flags(FLAG_WINDOW_RESIZABLE)
         init_window(1280, 720, b"Dev Window - Camera View")
         set_target_fps(60)
@@ -293,14 +354,17 @@ class ProjectorInterface:
             window_width = get_screen_width()
             window_height = get_screen_height()
 
-            # Draw camera view
+            # Split view: left = camera, right = warped
+            half_width = window_width // 2
+
+            # Draw camera view (left half)
             if self.current_camera_frame is not None:
                 camera_texture = self.create_texture_from_frame(self.current_camera_frame)
                 if camera_texture:
-                    scale = min(window_width / camera_texture.width, window_height / camera_texture.height)
+                    scale = min(half_width / camera_texture.width, window_height / camera_texture.height)
                     scaled_w = int(camera_texture.width * scale)
                     scaled_h = int(camera_texture.height * scale)
-                    offset_x = (window_width - scaled_w) // 2
+                    offset_x = (half_width - scaled_w) // 2
                     offset_y = (window_height - scaled_h) // 2
 
                     draw_texture_ex(camera_texture, Vector2(offset_x, offset_y), 0.0, scale, WHITE)
@@ -315,14 +379,42 @@ class ProjectorInterface:
                             draw_circle(x, y, 8, colors_ray[i])
                             draw_circle_lines(x, y, 12, colors_ray[i])
 
-                    # Draw detection boxes in camera space (if calibrated)
-                    if self.calibration_mode and self.detections:
-                        for detection in self.detections:
-                            # These are in warped/projector space, we need to show them differently
-                            # For now just show a count
-                            pass
-
+                    draw_text(b"Camera View", 10, 10, 20, WHITE)
                     unload_texture(camera_texture)
+
+            # Draw warped view (right half) if calibrated
+            if self.calibration_mode and self.warped_frame is not None:
+                warped_texture = self.create_texture_from_frame(self.warped_frame)
+                if warped_texture:
+                    scale = min(half_width / warped_texture.width, window_height / warped_texture.height)
+                    scaled_w = int(warped_texture.width * scale)
+                    scaled_h = int(warped_texture.height * scale)
+                    offset_x = half_width + (half_width - scaled_w) // 2
+                    offset_y = (window_height - scaled_h) // 2
+
+                    draw_texture_ex(warped_texture, Vector2(offset_x, offset_y), 0.0, scale, WHITE)
+
+                    # Draw detection boxes on warped view
+                    for detection in self.detections:
+                        x1, y1, x2, y2 = detection['bbox']
+                        conf = detection['confidence']
+                        class_name = detection['class']
+
+                        # Scale box coordinates to match displayed warped image
+                        scaled_x1 = int(x1 * scale) + offset_x
+                        scaled_y1 = int(y1 * scale) + offset_y
+                        scaled_x2 = int(x2 * scale) + offset_x
+                        scaled_y2 = int(y2 * scale) + offset_y
+
+                        draw_rectangle_lines(scaled_x1, scaled_y1, scaled_x2 - scaled_x1, scaled_y2 - scaled_y1, YELLOW)
+                        label = f"{class_name} {conf:.2f}"
+                        draw_text(label.encode(), scaled_x1, scaled_y1 - 20, 16, YELLOW)
+
+                    draw_text(b"Warped View (Projector Space)", half_width + 10, 10, 20, WHITE)
+                    unload_texture(warped_texture)
+
+            # Draw divider
+            draw_line(half_width, 0, half_width, window_height, GRAY)
 
             # Draw status
             status_y = 10

@@ -32,6 +32,9 @@ def main():
     WIDTH = 1920
     HEIGHT = 1080
 
+    # Disable Raylib verbose logging
+    set_trace_log_level(LOG_WARNING)
+
     # Allow fullscreen and resizing
     set_config_flags(FLAG_WINDOW_RESIZABLE)
     init_window(WIDTH, HEIGHT, b"Projection Window")
@@ -91,7 +94,12 @@ def main():
 
         # Handle mouse dragging for calibration dots
         mouse_pos = get_mouse_position()
-        mouse_x, mouse_y = mouse_pos.x, mouse_pos.y
+        mouse_x_window = mouse_pos.x
+        mouse_y_window = mouse_pos.y
+
+        # Convert mouse position to 1920x1080 space
+        mouse_x = mouse_x_window / window_width * WIDTH
+        mouse_y = mouse_y_window / window_height * HEIGHT
 
         # Read calibration state (read once before drawing)
         calibrated = False
@@ -110,21 +118,19 @@ def main():
         # Only allow dragging when not calibrated
         if not calibrated:
             if is_mouse_button_pressed(MOUSE_LEFT_BUTTON):
-                # Check which dot was clicked
+                # Check which dot was clicked (use window coordinates for hit detection)
                 for dot_name, pos in dot_positions.items():
-                    dx = mouse_x - pos[0]
-                    dy = mouse_y - pos[1]
+                    dx = mouse_x_window - pos[0]
+                    dy = mouse_y_window - pos[1]
                     if (dx * dx + dy * dy) <= (dot_radius * dot_radius):
                         dragging_dot = dot_name
                         break
 
             if is_mouse_button_down(MOUSE_LEFT_BUTTON) and dragging_dot:
-                # Update dot position (absolute)
-                dot_positions[dragging_dot] = [int(mouse_x), int(mouse_y)]
-                # Update relative position
+                # Store position in 1920x1080 space and as relative
                 dot_positions_relative[dragging_dot] = [
-                    mouse_x / window_width,
-                    mouse_y / window_height
+                    mouse_x / WIDTH,
+                    mouse_y / HEIGHT
                 ]
 
             if is_mouse_button_released(MOUSE_LEFT_BUTTON):

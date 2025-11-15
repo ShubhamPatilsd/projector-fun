@@ -9,4 +9,5 @@ dependencies = [
     "raylib>=5.0.0.3",
     "ultralytics>=8.0.0",
     "numpy>=1.24.0",
+    "mediapipe>=0.10.0",
 ]
