@@ -7,6 +7,16 @@ from pyray import ffi
 import cv2
 import numpy as np
 
+# MediaPipe hand connections (landmark pairs to draw lines between)
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),  # Thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),  # Index finger
+    (0, 9), (9, 10), (10, 11), (11, 12),  # Middle finger
+    (0, 13), (13, 14), (14, 15), (15, 16),  # Ring finger
+    (0, 17), (17, 18), (18, 19), (19, 20),  # Pinky
+    (5, 9), (9, 13), (13, 17)  # Palm connections
+]
+
 
 def create_texture_from_frame(frame):
     """Helper to convert numpy frame to Raylib texture"""
@@ -104,6 +114,7 @@ def main():
         # Read calibration state (read once before drawing)
         calibrated = False
         detections = []
+        hand_landmarks = []
 
         if state_file.exists():
             try:
@@ -111,9 +122,11 @@ def main():
                     state = pickle.load(f)
                     calibrated = state.get('calibrated', False)
                     detections = state.get('detections', [])
+                    hand_landmarks = state.get('hand_landmarks', [])
             except Exception as e:
                 calibrated = False
                 detections = []
+                hand_landmarks = []
 
         # Only allow dragging when not calibrated
         if not calibrated:
@@ -214,7 +227,35 @@ def main():
                     if warped_texture:
                         draw_texture(warped_texture, 0, 0, WHITE)
 
-                        # Draw bounding boxes
+                        # Draw hand landmarks with skeletal structure
+                        for hand in hand_landmarks:
+                            # Draw connections (skeletal lines)
+                            for connection in HAND_CONNECTIONS:
+                                start_idx, end_idx = connection
+                                if start_idx < len(hand) and end_idx < len(hand):
+                                    start_pos = hand[start_idx]
+                                    end_pos = hand[end_idx]
+                                    draw_line(start_pos[0], start_pos[1],
+                                             end_pos[0], end_pos[1],
+                                             Color(0, 255, 255, 255))  # Cyan lines
+
+                            # Draw landmark dots on top of lines
+                            for i, (x, y) in enumerate(hand):
+                                # Different colors for different parts
+                                if i == 0:  # Wrist
+                                    color = Color(255, 0, 0, 255)  # Red
+                                    radius = 8
+                                elif i in [4, 8, 12, 16, 20]:  # Fingertips
+                                    color = Color(0, 255, 0, 255)  # Green
+                                    radius = 6
+                                else:  # Other joints
+                                    color = Color(255, 255, 0, 255)  # Yellow
+                                    radius = 4
+
+                                draw_circle(x, y, radius, color)
+                                draw_circle_lines(x, y, radius + 2, WHITE)
+
+                        # Draw bounding boxes (if needed for object detection)
                         for detection in detections:
                             x1, y1, x2, y2 = detection['bbox']
                             conf = detection['confidence']

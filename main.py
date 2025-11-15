@@ -298,7 +298,8 @@ class ProjectorInterface:
         # Initialize state file to show calibration dots
         initial_state = {
             'calibrated': False,
-            'detections': []
+            'detections': [],
+            'hand_landmarks': []
         }
         with open(self.state_file, 'wb') as f:
             pickle.dump(initial_state, f)
@@ -354,17 +355,14 @@ class ProjectorInterface:
             window_width = get_screen_width()
             window_height = get_screen_height()
 
-            # Split view: left = camera, right = warped
-            half_width = window_width // 2
-
-            # Draw camera view (left half)
+            # Draw camera view (full window)
             if self.current_camera_frame is not None:
                 camera_texture = self.create_texture_from_frame(self.current_camera_frame)
                 if camera_texture:
-                    scale = min(half_width / camera_texture.width, window_height / camera_texture.height)
+                    scale = min(window_width / camera_texture.width, window_height / camera_texture.height)
                     scaled_w = int(camera_texture.width * scale)
                     scaled_h = int(camera_texture.height * scale)
-                    offset_x = (half_width - scaled_w) // 2
+                    offset_x = (window_width - scaled_w) // 2
                     offset_y = (window_height - scaled_h) // 2
 
                     draw_texture_ex(camera_texture, Vector2(offset_x, offset_y), 0.0, scale, WHITE)
@@ -379,58 +377,18 @@ class ProjectorInterface:
                             draw_circle(x, y, 8, colors_ray[i])
                             draw_circle_lines(x, y, 12, colors_ray[i])
 
-                    draw_text(b"Camera View", 10, 10, 20, WHITE)
                     unload_texture(camera_texture)
-
-            # Draw warped view (right half) if calibrated
-            if self.calibration_mode and self.warped_frame is not None:
-                warped_texture = self.create_texture_from_frame(self.warped_frame)
-                if warped_texture:
-                    scale = min(half_width / warped_texture.width, window_height / warped_texture.height)
-                    scaled_w = int(warped_texture.width * scale)
-                    scaled_h = int(warped_texture.height * scale)
-                    offset_x = half_width + (half_width - scaled_w) // 2
-                    offset_y = (window_height - scaled_h) // 2
-
-                    draw_texture_ex(warped_texture, Vector2(offset_x, offset_y), 0.0, scale, WHITE)
-
-                    # Draw detection boxes on warped view
-                    for detection in self.detections:
-                        x1, y1, x2, y2 = detection['bbox']
-                        conf = detection['confidence']
-                        class_name = detection['class']
-
-                        # Scale box coordinates to match displayed warped image
-                        scaled_x1 = int(x1 * scale) + offset_x
-                        scaled_y1 = int(y1 * scale) + offset_y
-                        scaled_x2 = int(x2 * scale) + offset_x
-                        scaled_y2 = int(y2 * scale) + offset_y
-
-                        draw_rectangle_lines(scaled_x1, scaled_y1, scaled_x2 - scaled_x1, scaled_y2 - scaled_y1, YELLOW)
-                        label = f"{class_name} {conf:.2f}"
-                        draw_text(label.encode(), scaled_x1, scaled_y1 - 20, 16, YELLOW)
-
-                    draw_text(b"Warped View (Projector Space)", half_width + 10, 10, 20, WHITE)
-                    unload_texture(warped_texture)
-
-            # Draw divider
-            draw_line(half_width, 0, half_width, window_height, GRAY)
 
             # Draw status
             status_y = 10
             if self.calibration_mode:
                 draw_text(b"Status: CALIBRATED", 10, status_y, 20, GREEN)
-                # Show detection count
-                det_count = f"Detections: {len(self.detections)}"
-                draw_text(det_count.encode(), 10, status_y + 25, 18, YELLOW)
-                # Show detected objects
-                if self.detections:
-                    objects_text = ", ".join([d['class'] for d in self.detections[:3]])
-                    if len(self.detections) > 3:
-                        objects_text += f" (+{len(self.detections)-3} more)"
-                    draw_text(objects_text.encode(), 10, status_y + 48, 16, LIGHTGRAY)
+                # Show hand count
+                hand_count = f"Hands detected: {len(self.hand_landmarks)}"
+                draw_text(hand_count.encode(), 10, status_y + 25, 18, YELLOW)
             else:
                 draw_text(b"Status: NOT CALIBRATED", 10, status_y, 20, RED)
+                draw_text(b"Press SPACE to calibrate", 10, status_y + 25, 16, LIGHTGRAY)
 
             # Show debug info for color detection
             if self.debug_masks:
